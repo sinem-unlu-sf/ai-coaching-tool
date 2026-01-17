@@ -436,6 +436,12 @@ export default function SessionScreen({ sessionId, selectedTraits, onSessionEnd 
         }
       }
 
+      if (!sid) {
+        setError('Unable to start session');
+        setStatus('idle');
+        return;
+      }
+
       const doTurn = async (usedSid: string) => {
         // build form + multi-location session id and query param
         const form = new FormData();
