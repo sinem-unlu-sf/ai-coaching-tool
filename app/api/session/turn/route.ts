@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sessions, Session, audioStore } from '../store';
+import { generateTTSAudio } from '../../shared/coaching';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'; // Default voice
 
 interface PersonalityTrait {
   id: string;
@@ -68,6 +67,12 @@ function buildCoachingPrompt(
     .map(msg => `${msg.role === 'user' ? 'User' : 'Coach'}: ${msg.content}`)
     .join('\n');
 
+  const recentCoachText = conversationHistory
+    .filter(msg => msg.role !== 'user')
+    .slice(-2)
+    .map((msg, idx) => `${idx + 1}. ${msg.content}`)
+    .join('\n');
+
   // Determine if session should end
   const shouldEndSession = 
     goalTracking.goalStated &&
@@ -85,7 +90,7 @@ COACHING PRINCIPLES:
 4. Ask clarifying questions - Until the goal is clearly stated
 5. Gently redirect - Keep focus on career/academic goals
 6. Maintain flexibility - Scope is moderately flexible but centered on goals
-
+7. Take a total of 4-5 turns maximum and end the conversation with a summary and next steps
 PERSONALITY TRAITS (${traits.join(', ')}):
 - Tone: ${tone}
 - Question-to-advice ratio: ${(avgQuestionRatio * 100).toFixed(0)}% questions, ${((1 - avgQuestionRatio) * 100).toFixed(0)}% advice
@@ -104,16 +109,26 @@ ${historyText || 'No previous conversation'}
 
 CURRENT USER MESSAGE: ${userMessage}
 
+RECENT COACH RESPONSES (avoid repeating wording from these):
+${recentCoachText || 'None yet'}
+
 INSTRUCTIONS:
 ${shouldEndSession 
   ? `This is the FINAL response. The session should end. You MUST:
-1. Explicitly signal closure ("Before we wrap up..." or similar)
-2. Summarize the user's goal clearly
-3. List 2-4 concrete next steps
-4. Offer a written summary
-5. Keep it concise (3-4 sentences total)`
-  : `Respond naturally as a coach. Use ${avgQuestionRatio > 0.6 ? 'mostly questions' : avgQuestionRatio < 0.4 ? 'mostly advice' : 'a balance of questions and advice'}. 
-Aim for 120–180 words and 5–8 complete sentences. Include at least one reflective question. Do not use fragments. Output only the response text.`}
+1. Signal closure naturally.
+2. Summarize the user's goal in plain language.
+3. Give 2-3 concrete next steps in sentence form (no bullet list).
+4. End with short encouragement.
+5. Keep it concise: 4-6 sentences, around 70-120 words.
+6. Do not reuse sentence openings or stock phrases from recent coach responses.`
+  : `Respond like a real human coach in live conversation. Use ${avgQuestionRatio > 0.6 ? 'mostly questions' : avgQuestionRatio < 0.4 ? 'mostly advice' : 'a balanced mix of questions and advice'}.
+1. Use natural spoken language with contractions.
+2. Vary sentence length and rhythm.
+3. Acknowledge the user's point briefly, then add one useful insight or practical next move.
+4. Ask at most one question, and only if it helps move the conversation.
+5. Avoid generic praise, avoid list formatting, and avoid repeating wording from recent coach responses.
+6. Keep it concise: 4-7 complete sentences, around 60-110 words.
+7. Output only the response text.`}
 
 IMPORTANT: Your response will be converted to speech. Write naturally as if speaking, not writing.
 `;
@@ -275,16 +290,16 @@ export async function POST(request: NextRequest) {
 
       const needsRepair = (text: string) => {
         const wc = text.trim().split(/\s+/).filter(Boolean).length;
-        return wc < 90 || looksTruncated(text) || !/[.!?]$/.test(text.trim());
+        return wc < 45 || wc > 140 || looksTruncated(text) || !/[.!?]$/.test(text.trim());
       };
 
       if (needsRepair(aiResponse)) {
-        const repairPrompt = `Rewrite the following coaching response so it is 120–180 words and composed of complete, well‑formed sentences. Keep the same meaning and tone. Do not add new topics. Include at least one reflective question. Avoid fragments.\n\nResponse:\n${aiResponse}`;
+        const repairPrompt = `Rewrite the following coaching response so it sounds more natural and conversational. Keep the same meaning and tone, do not add new topics, avoid repeating stock phrases, and keep it to 60-110 words in 4-7 complete sentences. Ask at most one question. Output only the revised response text.\n\nResponse:\n${aiResponse}`;
         aiResponse = await generateLLMText(repairPrompt, 0.5, 500);
       }
 
       if (needsRepair(aiResponse)) {
-        const regenPrompt = `${prompt}\n\nIMPORTANT: You MUST output 120–180 words in 5–8 complete sentences with at least one reflective question. No fragments. Output only the response text.`;
+        const regenPrompt = `${prompt}\n\nIMPORTANT: Output 60-110 words in 4-7 complete sentences, with no fragments, no bullet list, and no repetitive phrasing.`;
         aiResponse = await generateLLMText(regenPrompt, 0.4, 600);
       }
 
@@ -318,44 +333,13 @@ export async function POST(request: NextRequest) {
 
     // Step 7: Generate audio and return as base64
     let audioBase64: string | null = null;
-    
-    if (ELEVENLABS_API_KEY) {
-      try {
-        const ttsText = sanitizeForTTS(aiResponse);
 
-        const ttsResponse = await fetch(
-          `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
-          {
-            method: 'POST',
-            headers: {
-              'Accept': 'audio/mpeg',
-              'Content-Type': 'application/json',
-              'xi-api-key': ELEVENLABS_API_KEY,
-            },
-            body: JSON.stringify({
-              text: ttsText,
-              model_id: 'eleven_turbo_v2',
-              output_format: 'mp3_44100_128',
-              optimize_streaming_latency: 0,
-              voice_settings: {
-                stability: 0.5,
-                similarity_boost: 0.75,
-              },
-            }),
-          }
-        );
-
-        if (ttsResponse.ok) {
-          const audioBuffer = Buffer.from(await ttsResponse.arrayBuffer());
-          audioBase64 = audioBuffer.toString('base64');
-          console.log('[server] Audio generated:', { size: audioBuffer.length, base64Size: audioBase64.length });
-        } else {
-          const errorText = await ttsResponse.text();
-          console.error('ElevenLabs TTS error:', { status: ttsResponse.status, errorText });
-        }
-      } catch (ttsError) {
-        console.error('TTS error:', ttsError);
-      }
+    try {
+      const audioBuffer = await generateTTSAudio(aiResponse);
+      audioBase64 = audioBuffer.toString('base64');
+      console.log('[server] Audio generated:', { size: audioBuffer.length, base64Size: audioBase64.length });
+    } catch (ttsError) {
+      console.error('Smallest TTS error:', ttsError);
     }
 
     // Step 8: Return response
