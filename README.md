@@ -86,6 +86,64 @@ A voice-based AI coaching application for career and academic goals, built with 
 6. **Request Summary**: Click "Request Summary" at any time to get a written summary
 7. **Session End**: The session automatically ends when goals are clarified and next steps are defined
 
+## ESP32 Hardware Integration
+
+The repository includes firmware at [pentabyte electronics/Pentabyte/src/main.cpp](pentabyte%20electronics/Pentabyte/src/main.cpp) that connects your physical device to the web backend over Wi-Fi.
+
+### Supported hardware path
+
+- Press and hold button (GPIO4) to record from I2S microphone
+- Release button to send WAV audio to backend (`/api/esp32/turn`)
+- Backend runs STT + coaching + TTS
+- ESP32 receives MP3 response and plays it via I2S speaker
+
+### Pin mapping used in firmware
+
+- OLED SSD1351 (VSPI): MOSI=23, CLK=18, CS=5, DC=21, RST=22
+- I2S microphone: SCK=16, WS=17, SD=34
+- I2S speaker DAC: BCLK=26, LRC=27, DOUT=25
+- SD card (HSPI): SCK=14, MISO=19, MOSI=13, CS=15
+- Push button: GPIO4 (`INPUT_PULLUP`, active low)
+
+### Configure firmware
+
+Edit these constants in [pentabyte electronics/Pentabyte/src/main.cpp](pentabyte%20electronics/Pentabyte/src/main.cpp):
+
+- `WIFI_SSID`
+- `WIFI_PASS`
+- `SERVER_URL` (your computer's LAN IP + Next.js port, for example `http://192.168.1.42:3000`)
+
+Important: ESP32 and your computer must be on the same Wi-Fi network.
+
+### Backend requirements
+
+- `GEMINI_API_KEY` is required
+- `ELEVENLABS_API_KEY` is required for hardware audio playback (the ESP32 endpoint returns MP3)
+- Start server with `npm run dev`
+
+### Flash firmware (PlatformIO)
+
+From [pentabyte electronics/Pentabyte](pentabyte%20electronics/Pentabyte):
+
+```bash
+pio run -t upload
+pio device monitor -b 115200
+```
+
+If `pio` is missing, install PlatformIO Core first:
+
+```bash
+python3 -m pip install -U platformio
+```
+
+### Quick test checklist
+
+1. Start Next.js server and confirm it is reachable from another device on LAN.
+2. Power ESP32 and confirm serial log shows Wi-Fi connected and session started.
+3. Hold button while speaking, then release.
+4. Confirm serial log shows audio upload and MP3 bytes received.
+5. Confirm response plays from speaker and OLED state transitions (`REC` -> `THINKING...` -> `SPEAKING...`).
+
 ## Project Structure
 
 ```
